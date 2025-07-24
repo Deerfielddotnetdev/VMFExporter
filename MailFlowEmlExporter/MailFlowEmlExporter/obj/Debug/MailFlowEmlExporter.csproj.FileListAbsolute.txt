@@ -1,0 +1,7 @@
+C:\Development\VMFExporter\MailFlowEmlExporter\MailFlowEmlExporter\obj\Debug\MailFlowEmlExporter.csproj.AssemblyReference.cache
+C:\Development\VMFExporter\MailFlowEmlExporter\MailFlowEmlExporter\obj\Debug\MailFlowEmlExporter.csproj.CoreCompileInputs.cache
+C:\Development\VMFExporter\MailFlowEmlExporter\MailFlowEmlExporter\bin\Debug\MailFlowUtility.exe.config
+C:\Development\VMFExporter\MailFlowEmlExporter\MailFlowEmlExporter\bin\Debug\MailFlowUtility.exe
+C:\Development\VMFExporter\MailFlowEmlExporter\MailFlowEmlExporter\bin\Debug\MailFlowUtility.pdb
+C:\Development\VMFExporter\MailFlowEmlExporter\MailFlowEmlExporter\obj\Debug\MailFlowUtility.exe
+C:\Development\VMFExporter\MailFlowEmlExporter\MailFlowEmlExporter\obj\Debug\MailFlowUtility.pdb
