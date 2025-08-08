@@ -4,7 +4,7 @@
 using System;
 using System.Windows.Forms;
 
-namespace MailFlowEmlExporter
+namespace MailFlowExporter
 {
     static class Program
     {
