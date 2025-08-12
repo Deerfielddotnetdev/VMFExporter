@@ -12,254 +12,398 @@
 //******************************************************************************
 
 using System;
-using System.IO;
+using System.Collections.Generic;
 using System.Data.SqlClient;
+using System.IO;
+using System.Linq;
 using System.Net.Mail;
-using System.Security.Cryptography;
+using System.Net.Mime;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Net.Mime;
+using System.Windows.Forms;
 
-namespace MailFlowUtility
+namespace MailFlowEmlExporter
 {
-    class Program
+    internal static class Program
     {
-        static void Main(string[] args)
-        {
-            string logPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "MailFlowUtility.log");
-            void Log(string message)
-            {
-                string entry = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}";
-                Console.WriteLine(entry);
-                File.AppendAllText(logPath, entry + Environment.NewLine);
-            }
-
-            Log("=== Starting MailFlow Utility ===\n");
-
-            if (!VerifyRegistrationKey())
-            {
-                Log("Registration failed. Please enter a valid registration key.");
-                Console.WriteLine("Invalid registration key. Application will now exit.");
-                return;
-            }
-
-            string connectionString = "";
-            SqlConnection conn = null;
-            bool connected = false;
-
-            string server = null;
-            string database = null;
-            string authMode = null;
-            string user = null;
-            string pass = null;
-
-            if (args.Length > 0)
-            {
-                foreach (var arg in args)
-                {
-                    var parts = arg.Split('=');
-                    if (parts.Length == 2)
-                    {
-                        string key = parts[0].ToLower();
-                        string value = parts[1];
-                        if (key == "--server") server = value;
-                        else if (key == "--db") database = value;
-                        else if (key == "--auth") authMode = value;
-                        else if (key == "--user") user = value;
-                        else if (key == "--pass") pass = value;
-                    }
-                }
-            }
-
-            while (!connected)
-            {
-                try
-                {
-                    if (string.IsNullOrEmpty(server))
-                    {
-                        Console.Write("Enter SQL Server name (e.g., localhost\\SQLEXPRESS): ");
-                        server = Console.ReadLine();
-                    }
-                    if (string.IsNullOrEmpty(database))
-                    {
-                        Console.Write("Enter Database name: ");
-                        database = Console.ReadLine();
-                    }
-                    if (string.IsNullOrEmpty(authMode))
-                    {
-                        Console.WriteLine("Select Authentication Mode:");
-                        Console.WriteLine("1 - Windows Integrated Security");
-                        Console.WriteLine("2 - SQL Server Authentication");
-                        Console.Write("Choice: ");
-                        authMode = Console.ReadLine();
-                    }
-
-                    if (authMode == "1" || authMode.ToLower() == "windows")
-                    {
-                        connectionString = $"Server={server};Database={database};Integrated Security=True;";
-                    }
-                    else if (authMode == "2" || authMode.ToLower() == "sql")
-                    {
-                        if (string.IsNullOrEmpty(user))
-                        {
-                            Console.Write("SQL Username: ");
-                            user = Console.ReadLine();
-                        }
-                        if (string.IsNullOrEmpty(pass))
-                        {
-                            Console.Write("SQL Password: ");
-                            pass = ReadPassword();
-                        }
-                        connectionString = $"Server={server};Database={database};User ID={user};Password={pass};";
-                    }
-                    else
-                    {
-                        Log("Invalid authentication option. Exiting.");
-                        return;
-                    }
-
-                    connectionString += ";MultipleActiveResultSets=True";
-                    conn = new SqlConnection(connectionString);
-                    Log("Connecting to database...");
-                    conn.Open();
-                    connected = true;
-                    Log("Successfully logged in.");
-                }
-                catch (Exception ex)
-                {
-                    Log("Connection failed: " + ex.Message);
-                    if (args.Length > 0)
-                    {
-                        Log("Exiting due to command-line mode failure.");
-                        return;
-                    }
-                    Console.WriteLine("Would you like to retry? (y/n): ");
-                    if (Console.ReadLine().Trim().ToLower() != "y") return;
-                }
-            }
-
-            while (true)
-            {
-                Console.WriteLine("\nMailFlow Utility Menu:");
-                Console.WriteLine("1 - MailFlow Totals (Agent and Ticket counts)");
-                Console.WriteLine("2 - Export Messages to EML");
-                Console.WriteLine("3 - Soft Delete Tickets");
-                Console.WriteLine("4 - Hard Delete Tickets");
-                Console.WriteLine("0 - Exit");
-                Console.Write("Select an option: ");
-                var input = Console.ReadLine();
-
-                switch (input)
-                {
-                    case "0":
-                        return;
-                    case "1":
-                        ExecuteMailFlowTotals(conn, Log);
-                        break;
-                    case "2":
-                        Console.WriteLine("Export to EML not yet implemented in this snippet.");
-                        break;
-                    case "3":
-                        Console.WriteLine("Soft delete not yet implemented in this snippet.");
-                        break;
-                    case "4":
-                        Console.WriteLine("Hard delete not yet implemented in this snippet.");
-                        break;
-                    default:
-                        Console.WriteLine("Invalid option.");
-                        break;
-                }
-            }
-        }
-
-        private static bool VerifyRegistrationKey()
-        {
-            const string storedHash = "A25F7F1D8846C99F4C2B89A5DC95B64D6C9824E8161F9FCEFF69DBF8619D2E40"; // SHA256 hash of valid key
-            const string salt = "MySecretSalt";
-
-            Console.Write("Enter registration key: ");
-            string inputKey = Console.ReadLine().Trim();
-
-            using (SHA256 sha = SHA256.Create())
-            {
-                byte[] hashBytes = sha.ComputeHash(Encoding.UTF8.GetBytes(inputKey + salt));
-                string inputHash = BitConverter.ToString(hashBytes).Replace("-", "");
-                return inputHash.Equals(storedHash, StringComparison.OrdinalIgnoreCase);
-            }
-        }
-
-        private static void ExecuteMailFlowTotals(SqlConnection conn, Action<string> Log)
+        /// <summary>
+        /// Entry point. Shows the UnlockForm (unless --dev-bypass is supplied), then runs the exporter.
+        /// - Presents the unlock UI for licensing/gating.
+        /// - Parses CLI args and hands control to Exporter.Run().
+        /// - Guards against unhandled exceptions and shows a friendly error dialog if possible.
+        /// </summary>
+        [STAThread]
+        private static int Main(string[] args)
         {
             try
             {
-                Log("=== MailFlow Totals ===");
+                var devBypass = HasArg(args, "--dev-bypass");
 
-                Log("Counting enabled agents...");
-                using (SqlCommand cmd = new SqlCommand("SELECT COUNT(*) FROM Agents WHERE IsEnabled = 1", conn))
+                // --- Unlock gate ---
+                // If not bypassed, display the UnlockForm as a modal dialog.
+                // The exporter only runs when the dialog returns OK (user unlocked successfully).
+                if (!devBypass)
                 {
-                    int count = (int)cmd.ExecuteScalar();
-                    Log("Total enabled agents: " + count);
-                }
+                    Application.EnableVisualStyles();
+                    Application.SetCompatibleTextRenderingDefault(false);
 
-                Log("Counting tickets by status...");
-                string query = @"SELECT TicketStateID, COUNT(*) AS Count FROM Tickets WHERE TicketStateID IN (1, 2, 3, 6) GROUP BY TicketStateID ORDER BY TicketStateID";
-                using (SqlCommand cmd = new SqlCommand(query, conn))
-                using (SqlDataReader reader = cmd.ExecuteReader())
-                {
-                    while (reader.Read())
+                    using (var unlock = new UnlockForm())
                     {
-                        int state = reader.GetInt32(0);
-                        int count = reader.GetInt32(1);
-                        string stateName = "";
-                        switch (state)
+                        var result = unlock.ShowDialog();
+                        if (result != DialogResult.OK)
                         {
-                            case 1:
-                                stateName = "Closed";
-                                break;
-                            case 2:
-                                stateName = "Open";
-                                break;
-                            case 3:
-                                stateName = "On-Hold";
-                                break;
-                            case 6:
-                                stateName = "Marked for Deletion";
-                                break;
-                            default:
-                                stateName = "Unknown State (" + state + ")";
-                                break;
+                            // User closed the form or did not unlock; exit gracefully.
+                            return 1;
                         }
-
-                        Log("Tickets (" + stateName + "): " + count);
                     }
                 }
+
+                // --- Parse options + run ---
+                // Converts CLI args into an ExportOptions object and starts the export.
+                var options = Exporter.ParseArgs(args);
+                return Exporter.Run(options);
             }
             catch (Exception ex)
             {
-                Log("Error while retrieving MailFlow totals: " + ex.Message);
+                // Final safety net. Try to show a dialog; if we’re headless (no UI), just return failure.
+                try { MessageBox.Show(ex.ToString(), "MailFlow EML Exporter - Fatal Error", MessageBoxButtons.OK, MessageBoxIcon.Error); } catch { /* ignore */ }
+                return 1;
             }
         }
 
-        private static string ReadPassword()
+        /// <summary>
+        /// Convenience: check if a flag exists in the args (e.g., --dev-bypass).
+        /// </summary>
+        private static bool HasArg(string[] args, string key) =>
+            Array.FindIndex(args, a => string.Equals(a, key, StringComparison.OrdinalIgnoreCase)) >= 0;
+    }
+
+    /// <summary>
+    /// Strongly-typed container for CLI options (connection string, export directory, and optional date range).
+    /// </summary>
+    internal sealed class ExportOptions
+    {
+        public string ConnectionString { get; set; } =
+            "Server=YOUR_SERVER;Database=YOUR_DB;Trusted_Connection=True;";
+
+        public string ExportDir { get; set; } =
+            Path.Combine(Environment.CurrentDirectory, "exports");
+
+        public DateTime? From { get; set; }
+        public DateTime? To { get; set; }
+    }
+
+    internal static class Exporter
+    {
+        /// <summary>
+        /// Orchestrates the full export:
+        /// - Ensures output folder exists.
+        /// - Connects to SQL.
+        /// - Iterates Inbound and Outbound tables with optional date filters.
+        /// - For each message:
+        ///   * Builds a MailMessage (addresses, subject, body, headers)
+        ///   * Attaches files from the attachment tables
+        ///   * Generates a safe, unique .eml filename
+        ///   * Uses SmtpClient’s pickup-directory to emit a .eml, then moves it to the export folder
+        /// - Logs progress and warnings; continues past per-message errors.
+        /// </summary>
+        public static int Run(ExportOptions options)
         {
-            string pass = "";
-            ConsoleKeyInfo key;
-            do
-            {
-                key = Console.ReadKey(true);
-                if (key.Key != ConsoleKey.Backspace && key.Key != ConsoleKey.Enter)
-                {
-                    pass += key.KeyChar;
-                    Console.Write("*");
-                }
-                else if (key.Key == ConsoleKey.Backspace && pass.Length > 0)
-                {
-                    pass = pass.Substring(0, pass.Length - 1);
-                    Console.Write("\b \b");
-                }
-            } while (key.Key != ConsoleKey.Enter);
+            // --- Ensure output directory exists ---
+            Directory.CreateDirectory(options.ExportDir);
+
+            Console.WriteLine($"Export dir : {options.ExportDir}");
+            Console.WriteLine($"Date range : {(options.From.HasValue ? options.From.Value.ToString("u") : "Any")} -> {(options.To.HasValue ? options.To.Value.ToString("u") : "Any")}");
             Console.WriteLine();
-            return pass;
+
+            // --- Open SQL connection ---
+            using var conn = new SqlConnection(options.ConnectionString);
+            conn.Open();
+
+            // --- Process both directions with the same logic ---
+            foreach (var meta in new[]
+            {
+                new { Direction = "Inbound",  MsgTable = "InboundMessages",  AttTable = "InboundMessageAttachments" },
+                new { Direction = "Outbound", MsgTable = "OutboundMessages", AttTable = "OutboundMessageAttachments" }
+            })
+            {
+                Console.WriteLine($"=== Processing {meta.Direction} ===");
+
+                // --- Build WHERE clause for optional date filtering ---
+                var where = new List<string>();
+                if (options.From.HasValue) where.Add("EmailDateTime >= @From");
+                if (options.To.HasValue)   where.Add("EmailDateTime <  @To");
+
+                // --- Compose SQL for messages (ordered for deterministic output) ---
+                var messageQuery = $@"
+SELECT ID, EmailFrom, EmailPrimaryTo, EmailTo, EmailCc, EmailBcc, EmailDateTime, Subject, Body
+FROM {meta.MsgTable}
+{(where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : "")}
+ORDER BY EmailDateTime ASC, ID ASC";
+
+                using var cmd = new SqlCommand(messageQuery, conn);
+                if (options.From.HasValue) cmd.Parameters.AddWithValue("@From", options.From.Value);
+                if (options.To.HasValue)   cmd.Parameters.AddWithValue("@To", options.To.Value);
+
+                using var reader = cmd.ExecuteReader();
+                var count = 0;
+
+                // --- Iterate messages ---
+                while (reader.Read())
+                {
+                    try
+                    {
+                        // --- Extract fields from the current row ---
+                        var id      = reader.GetInt32(reader.GetOrdinal("ID"));
+                        var from    = reader["EmailFrom"]?.ToString() ?? "";
+                        var pto     = reader["EmailPrimaryTo"]?.ToString() ?? "";
+                        var to      = reader["EmailTo"]?.ToString() ?? "";
+                        var cc      = reader["EmailCc"]?.ToString() ?? "";
+                        var bcc     = reader["EmailBcc"]?.ToString() ?? "";
+                        var subject = reader["Subject"]?.ToString() ?? "";
+                        var body    = reader["Body"]?.ToString() ?? "";
+                        var date    = reader.GetDateTime(reader.GetOrdinal("EmailDateTime"));
+
+                        // --- Build MailMessage with proper encodings and headers ---
+                        using var msg = new MailMessage();
+
+                        // From (tolerates "Name <addr@x.com>" formats or raw addresses)
+                        if (!string.IsNullOrWhiteSpace(from))
+                            msg.From = SafeAddress(from);
+
+                        // To/CC/BCC
+                        // Note: we prioritize EmailPrimaryTo then append EmailTo, and split on comma/semicolon.
+                        AddAddresses(msg.To, pto);
+                        AddAddresses(msg.To, to);
+                        AddAddresses(msg.CC, cc);
+                        AddAddresses(msg.Bcc, bcc);
+
+                        // Subject + encodings
+                        msg.Subject = subject ?? "";
+                        msg.SubjectEncoding  = Encoding.UTF8;
+                        msg.BodyEncoding     = Encoding.UTF8;
+                        msg.HeadersEncoding  = Encoding.UTF8;
+
+                        // Body (detect HTML vs. plain text via lightweight heuristic)
+                        var isHtml = LooksLikeHtml(body);
+                        msg.IsBodyHtml = isHtml;
+                        msg.Body       = body ?? "";
+
+                        // Force RFC 2822 Date header (UTC "r" format)
+                        msg.Headers.Remove("Date");
+                        msg.Headers.Add("Date", date.ToUniversalTime().ToString("r"));
+
+                        // --- Load and attach files for this message ---
+                        foreach (var att in GetAttachments(conn, meta.AttTable, id))
+                        {
+                            if (File.Exists(att.Path))
+                            {
+                                var attachment = new Attachment(att.Path, MediaTypeNames.Application.Octet)
+                                {
+                                    Name = att.FileName
+                                };
+                                msg.Attachments.Add(attachment);
+                            }
+                            else
+                            {
+                                // Missing files aren’t fatal; we log and continue.
+                                Console.WriteLine($"[warn] Missing attachment file: {att.Path}");
+                            }
+                        }
+
+                        // --- Build a safe, unique output filename ---
+                        var safeBase = BuildSafeFileBase(id, subject, date, meta.Direction);
+                        var emlPath  = UniquePath(Path.Combine(options.ExportDir, safeBase + ".eml"));
+
+                        // --- Emit .eml via pickup directory (isolated per message to avoid races) ---
+                        var pickup = Path.Combine(Path.GetTempPath(), "eml_pickup_" + Guid.NewGuid().ToString("N"));
+                        Directory.CreateDirectory(pickup);
+
+                        using (var client = new SmtpClient())
+                        {
+                            client.DeliveryMethod = SmtpDeliveryMethod.SpecifiedPickupDirectory;
+                            client.PickupDirectoryLocation = pickup;
+                            client.Send(msg);
+                        }
+
+                        // --- Move the generated .eml into the export directory ---
+                        var generated = Directory.EnumerateFiles(pickup, "*.eml")
+                                                 .OrderByDescending(File.GetCreationTimeUtc)
+                                                 .FirstOrDefault();
+                        if (generated == null)
+                            throw new InvalidOperationException("No .eml generated by pickup directory.");
+
+                        File.Move(generated, emlPath);
+                        Directory.Delete(pickup, true);
+                        count++;
+
+                        // --- Periodic progress log ---
+                        if (count % 50 == 0) Console.WriteLine($"... {count} messages exported");
+                    }
+                    catch (Exception exMsg)
+                    {
+                        // Per-message error: log and continue to next message.
+                        Console.WriteLine($"[error] Message export failed: {exMsg.Message}");
+                    }
+                }
+
+                // --- Direction summary ---
+                Console.WriteLine($"Exported {count} {meta.Direction.ToLowerInvariant()} message(s).");
+            }
+
+            Console.WriteLine("\nExport complete.");
+            return 0;
+        }
+
+        /// <summary>
+        /// Parses CLI args into an ExportOptions instance.
+        /// Supports:
+        ///   --conn "SQL connection string"
+        ///   --out  "output folder"
+        ///   --from YYYY-MM-DD (inclusive)
+        ///   --to   YYYY-MM-DD (exclusive)
+        /// </summary>
+        public static ExportOptions ParseArgs(string[] args)
+        {
+            var opt = new ExportOptions
+            {
+                ConnectionString = GetArg(args, "--conn") ?? "Server=YOUR_SERVER;Database=YOUR_DB;Trusted_Connection=True;",
+                ExportDir        = GetArg(args, "--out")  ?? Path.Combine(Environment.CurrentDirectory, "exports"),
+                From             = TryParseDate(GetArg(args, "--from")),
+                To               = TryParseDate(GetArg(args, "--to"))
+            };
+            return opt;
+        }
+
+        /// <summary>
+        /// Returns the value immediately following a flag (e.g., for "--out C:\path", returns "C:\path").
+        /// Returns null if not present.
+        /// </summary>
+        private static string GetArg(string[] args, string key)
+        {
+            var i = Array.FindIndex(args, a => string.Equals(a, key, StringComparison.OrdinalIgnoreCase));
+            if (i >= 0 && i + 1 < args.Length) return args[i + 1];
+            return null;
+        }
+
+        /// <summary>
+        /// Tries to parse a date string (flexible parser). Returns null on failure.
+        /// </summary>
+        private static DateTime? TryParseDate(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s)) return null;
+            return DateTime.TryParse(s, out var dt) ? dt : (DateTime?)null;
+        }
+
+        /// <summary>
+        /// Builds a MailAddress from raw input.
+        /// Accepts "Name &lt;email@x.com&gt;" or "email@x.com"; falls back to scraping angle brackets if needed.
+        /// </summary>
+        private static MailAddress SafeAddress(string raw)
+        {
+            try { return new MailAddress(raw.Trim()); }
+            catch { return new MailAddress(ScrubAngleAddress(raw)); }
+        }
+
+        /// <summary>
+        /// If the address is in "Name &lt;addr&gt;" format, returns only "addr"; otherwise returns the trimmed input.
+        /// </summary>
+        private static string ScrubAngleAddress(string raw)
+        {
+            var m = Regex.Match(raw, @"<([^>]+)>");
+            return m.Success ? m.Groups[1].Value.Trim() : raw.Trim();
+        }
+
+        /// <summary>
+        /// Adds multiple addresses into a MailAddressCollection.
+        /// Splits on commas and semicolons; ignores malformed addresses instead of throwing.
+        /// </summary>
+        private static void AddAddresses(MailAddressCollection collection, string list)
+        {
+            if (string.IsNullOrWhiteSpace(list)) return;
+            var parts = list.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var p in parts)
+            {
+                var s = p.Trim();
+                if (s.Length == 0) continue;
+                try { collection.Add(new MailAddress(s)); }
+                catch { /* ignore malformed */ }
+            }
+        }
+
+        /// <summary>
+        /// Quick heuristic to guess whether a body is HTML.
+        /// Looks for common HTML markers/tags.
+        /// </summary>
+        private static bool LooksLikeHtml(string body)
+        {
+            if (string.IsNullOrEmpty(body)) return false;
+            var b = body.TrimStart();
+            return b.StartsWith("<!DOCTYPE", StringComparison.OrdinalIgnoreCase)
+                || b.StartsWith("<html", StringComparison.OrdinalIgnoreCase)
+                || Regex.IsMatch(body, @"</\s*(html|body|p|div|span|table)\s*>", RegexOptions.IgnoreCase);
+        }
+
+        /// <summary>
+        /// Builds a readable, mostly safe filename base:
+        /// "[yyyyMMdd_HHmmss]_[Direction]_[ID]_[Subject...]"
+        /// - Replaces invalid path characters with underscores
+        /// - Collapses whitespace
+        /// - Truncates to ~140 chars to avoid path issues
+        /// </summary>
+        private static string BuildSafeFileBase(int id, string subject, DateTime date, string direction)
+        {
+            var ts = date.ToString("yyyyMMdd_HHmmss");
+            var baseName = $"{ts}_{direction}_{id}_{subject ?? ""}";
+
+            var invalid = new string(Path.GetInvalidFileNameChars()) + new string(Path.GetInvalidPathChars());
+            var cleaned = new string(baseName.Select(ch => invalid.Contains(ch) ? '_' : ch).ToArray());
+            cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+
+            if (cleaned.Length > 140) cleaned = cleaned.Substring(0, 140).Trim();
+            return cleaned.Length == 0 ? $"{ts}_{direction}_{id}" : cleaned;
+        }
+
+        /// <summary>
+        /// If the target file exists, appends " (n)" before the extension until a free path is found.
+        /// Throws if it can’t find a unique name after many attempts (practically unreachable).
+        /// </summary>
+        private static string UniquePath(string path)
+        {
+            if (!File.Exists(path)) return path;
+            var dir  = Path.GetDirectoryName(path)!;
+            var name = Path.GetFileNameWithoutExtension(path);
+            var ext  = Path.GetExtension(path);
+            for (int i = 1; i < 10_000; i++)
+            {
+                var candidate = Path.Combine(dir, $"{name} ({i}){ext}");
+                if (!File.Exists(candidate)) return candidate;
+            }
+            throw new IOException("Could not create a unique filename.");
+        }
+
+        /// <summary>
+        /// Enumerates (FileName, Path) for attachments linked to a given message ID.
+        /// Joins the direction-specific link table (Inbound/OutboundMessageAttachments) to the shared Attachments table.
+        /// </summary>
+        private static IEnumerable<(string FileName, string Path)> GetAttachments(SqlConnection conn, string attachmentTable, int messageId)
+        {
+            const string sql = @"
+SELECT A.FileName, A.AttachmentLocation
+FROM {0} MA
+JOIN Attachments A ON MA.AttachmentID = A.ID
+WHERE MA.MessageID = @MsgID";
+
+            using var cmd = new SqlCommand(string.Format(sql, attachmentTable), conn);
+            cmd.Parameters.AddWithValue("@MsgID", messageId);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                yield return (
+                    r["FileName"]?.ToString() ?? "attachment",
+                    r["AttachmentLocation"]?.ToString() ?? ""
+                );
+            }
         }
     }
 }
